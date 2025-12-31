@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# macOS Finder files
+.DS_Store
+
+# VS Code / Cursor settings
+.vscode/
+.cursor/
+
+# Logs
+*.log
