@@ -714,9 +714,15 @@ def compute_sharpe_ratio(daily_returns, years, risk_free_rate=0.0):
     """
     Compute annualized Sharpe ratio for a given period.
     
+    Uses mean daily excess returns methodology (matches compute_rolling_sharpe_ratio):
+    - Converts annual risk-free rate to daily
+    - Computes mean daily excess return (daily return - daily risk-free rate)
+    - Computes standard deviation of daily returns
+    - Sharpe = (mean daily excess return / daily return volatility) × sqrt(252)
+    
     daily_returns: Series of daily returns
     years: number of years to look back
-    risk_free_rate: annual risk-free rate (default 0.0)
+    risk_free_rate: annual risk-free rate (default 0.0, typically from ^TNX 10-year Treasury)
     
     Returns: Sharpe ratio (float) or None if insufficient data
     """
@@ -731,18 +737,24 @@ def compute_sharpe_ratio(daily_returns, years, risk_free_rate=0.0):
     if len(period_returns) < MIN_OBS_SHARPE:
         return None
     
-    # Annualized return
-    total_return = (1 + period_returns).prod() - 1
-    annualized_return = (1 + total_return) ** (1 / years) - 1
+    # Convert annual risk-free rate to daily using compound interest
+    # Formula: (1 + r_annual)^(1/252) - 1
+    daily_rf = (1 + risk_free_rate) ** (1 / 252.0) - 1
     
-    # Annualized volatility
-    volatility = period_returns.std() * (252 ** 0.5)
+    # Compute mean daily excess return (daily return - daily risk-free rate)
+    excess_returns = period_returns - daily_rf
+    mean_daily_excess_return = excess_returns.mean()
     
-    if volatility == 0:
+    # Compute standard deviation of daily returns (not excess returns)
+    daily_volatility = period_returns.std()
+    
+    # Handle divide-by-zero: return None if volatility is zero
+    if daily_volatility == 0 or pd.isna(daily_volatility) or pd.isna(mean_daily_excess_return):
         return None
     
-    # Sharpe ratio: (Return - Risk-free rate) / Volatility
-    sharpe = (annualized_return - risk_free_rate) / volatility
+    # Compute Sharpe ratio
+    # Sharpe = (mean daily excess return / daily return volatility) × sqrt(252)
+    sharpe = (mean_daily_excess_return / daily_volatility) * np.sqrt(252)
     return float(sharpe)
 
 def compute_sortino_ratio(daily_returns, years, risk_free_rate=0.0):
@@ -752,11 +764,17 @@ def compute_sortino_ratio(daily_returns, years, risk_free_rate=0.0):
     Sortino ratio is like Sharpe ratio but only penalizes downside volatility
     (standard deviation of negative returns only).
     
+    Uses mean daily excess returns methodology (consistent with compute_sharpe_ratio):
+    - Converts annual risk-free rate to daily
+    - Computes mean daily excess return (daily return - daily risk-free rate)
+    - Computes downside deviation of daily returns (std of negative returns only)
+    - Sortino = (mean daily excess return / downside deviation) × sqrt(252)
+    
     daily_returns: Series of daily returns
     years: number of years to look back
-    risk_free_rate: annual risk-free rate (default 0.0)
+    risk_free_rate: annual risk-free rate (default 0.0, typically from ^TNX 10-year Treasury)
     
-    Returns: Sortino ratio (float)
+    Returns: Sortino ratio (float) or None if insufficient data
     """
     if len(daily_returns) == 0:
         return None
@@ -769,11 +787,15 @@ def compute_sortino_ratio(daily_returns, years, risk_free_rate=0.0):
     if len(period_returns) < MIN_OBS_SORTINO:
         return None
     
-    # Annualized return
-    total_return = (1 + period_returns).prod() - 1
-    annualized_return = (1 + total_return) ** (1 / years) - 1
+    # Convert annual risk-free rate to daily using compound interest
+    # Formula: (1 + r_annual)^(1/252) - 1
+    daily_rf = (1 + risk_free_rate) ** (1 / 252.0) - 1
     
-    # Downside deviation: std of only negative returns
+    # Compute mean daily excess return (daily return - daily risk-free rate)
+    excess_returns = period_returns - daily_rf
+    mean_daily_excess_return = excess_returns.mean()
+    
+    # Downside deviation: std of only negative returns (not excess returns)
     negative_returns = period_returns[period_returns < 0]
     
     if len(negative_returns) == 0:
@@ -781,15 +803,15 @@ def compute_sortino_ratio(daily_returns, years, risk_free_rate=0.0):
         # Return None to indicate it's not meaningful (no downside volatility to measure)
         return None
     
-    # Annualized downside deviation
-    downside_std = negative_returns.std() * (252 ** 0.5)
+    # Daily downside deviation: std of only negative returns
+    daily_downside_std = negative_returns.std()
     
-    if downside_std == 0 or pd.isna(downside_std):
+    if daily_downside_std == 0 or pd.isna(daily_downside_std) or pd.isna(mean_daily_excess_return):
         # Downside deviation is zero or NaN - cannot compute meaningful ratio
         return None
     
-    # Sortino ratio: (Return - Risk-free rate) / Downside Deviation
-    sortino = (annualized_return - risk_free_rate) / downside_std
+    # Sortino ratio: (mean daily excess return / daily downside deviation) × sqrt(252)
+    sortino = (mean_daily_excess_return / daily_downside_std) * np.sqrt(252)
     return float(sortino)
 
 def compute_rolling_sharpe_ratio(daily_returns, window_months=6, risk_free_rate=0.0):
@@ -815,8 +837,9 @@ def compute_rolling_sharpe_ratio(daily_returns, window_months=6, risk_free_rate=
     # Define 6-month rolling window as 126 trading days (21 trading days × 6 months)
     window_days = 126
     
-    # Convert annual risk-free rate to daily
-    daily_rf = risk_free_rate / 252.0
+    # Convert annual risk-free rate to daily using compound interest
+    # Formula: (1 + r_annual)^(1/252) - 1
+    daily_rf = (1 + risk_free_rate) ** (1 / 252.0) - 1
     
     # Initialize result series with NaN
     rolling_sharpe = pd.Series(index=daily_returns.index, dtype=float)
