@@ -77,6 +77,8 @@ from portfolio_tool.analytics import (
     get_effective_start_date,
     get_as_of_date,
     compute_ytd_risk_contribution,
+    compute_window_cagr,
+    compute_asset_breakdown,
     MIN_OBS_CALMAR,
     MIN_OBS_SHARPE,
     MIN_OBS_SORTINO,
@@ -375,11 +377,11 @@ async def analyze_portfolio(request: PortfolioRequest):
         
         if actual_period_years_int and actual_period_years_int > 0 and len(benchmark_daily_windowed) >= MIN_OBS_SHARPE:
             bench_sharpe = compute_sharpe_ratio(benchmark_daily_windowed, years=actual_period_years_int, risk_free_rate=risk_free_rate)
-            benchmark_risk_metrics['sharpeRatio'] = safe_float_or_none(bench_sharpe)
+        benchmark_risk_metrics['sharpeRatio'] = safe_float_or_none(bench_sharpe)
         
         if actual_period_years_int and actual_period_years_int > 0 and len(benchmark_daily_windowed) >= MIN_OBS_SORTINO:
             bench_sortino = compute_sortino_ratio(benchmark_daily_windowed, years=actual_period_years_int, risk_free_rate=risk_free_rate)
-            benchmark_risk_metrics['sortinoRatio'] = safe_float_or_none(bench_sortino)
+        benchmark_risk_metrics['sortinoRatio'] = safe_float_or_none(bench_sortino)
         
         if len(benchmark_cum_windowed) >= 20:
             bench_max_dd = compute_max_drawdown(benchmark_cum_windowed, years=actual_period_years_int if actual_period_years_int else 1)
@@ -433,13 +435,23 @@ async def analyze_portfolio(request: PortfolioRequest):
             # For display purposes, we can still call it "5Y" if the period is close to 5 years
             pass
         
+        # Compute window-based CAGR for Summary (uses actual period length, not hardcoded 5Y)
+        # This is separate from period_returns which uses bucketed horizons (1Y/3Y/5Y)
+        summary_cagr_portfolio, summary_cagr_audit = compute_window_cagr(
+            prices_portfolio_windowed, weights=weights
+        )
+        summary_cagr_benchmark, summary_cagr_benchmark_audit = compute_window_cagr(
+            prices_benchmark_windowed, weights=None
+        )
+        
         # Extract 5Y metrics for Performance Metrics table (using windowed series)
         # Note: These use the full effective window, not a fixed 5Y lookback
+        # Summary CAGR now uses window-based calculation, not period_returns['5Y']
         performance_metrics_5y = {
             'cumulativeReturn5Y': cumulative_return_5y_portfolio,
             'cumulativeReturn5YBenchmark': cumulative_return_5y_benchmark,
-            'cagr5Y': period_returns_portfolio.get('5Y', 0.0),
-            'cagr5YBenchmark': period_returns_benchmark.get('5Y', 0.0),
+            'cagr5Y': safe_float(summary_cagr_portfolio) if summary_cagr_portfolio is not None else 0.0,
+            'cagr5YBenchmark': safe_float(summary_cagr_benchmark) if summary_cagr_benchmark is not None else 0.0,
             'maxDrawdown5Y': risk_metrics['maxDrawdown'],  # Use the windowed max drawdown
             'maxDrawdown5YBenchmark': benchmark_risk_metrics['maxDrawdown'],  # Use the windowed max drawdown
             'sharpeRatio5Y': risk_metrics['sharpeRatio'] if risk_metrics['sharpeRatio'] is not None else 0.0,
@@ -728,11 +740,21 @@ async def analyze_portfolio(request: PortfolioRequest):
                 min_var_point = min(efficient_frontier['points'], key=lambda x: x['risk'])
                 efficient_frontier['minVariance'] = min_var_point
         
-        # Holdings
-        holdings = [
-            {'ticker': ticker, 'weight': safe_float(weight)}
-            for ticker, weight in weights.items()
-        ]
+        # Asset Breakdown (replaces simple holdings)
+        # Compute asset-level metrics using windowed prices
+        asset_breakdown = compute_asset_breakdown(prices_portfolio_windowed, weights)
+        
+        # Format for API response (convert to percentages where appropriate)
+        holdings = []
+        for asset in asset_breakdown:
+            holdings.append({
+                'ticker': asset['ticker'],
+                'weight': safe_float(asset['weight'] * 100),  # Convert to percentage
+                'cagr': safe_float(asset['cagr'] * 100) if asset['cagr'] is not None else None,  # Convert to percentage
+                'volatility': safe_float(asset['volatility'] * 100) if asset['volatility'] is not None else None,  # Convert to percentage
+                'bestDay': safe_float(asset['bestDay'] * 100) if asset['bestDay'] is not None else None,  # Convert to percentage
+                'worstDay': safe_float(asset['worstDay'] * 100) if asset['worstDay'] is not None else None  # Convert to percentage
+            })
         
         # Warnings
         warnings = []
@@ -774,6 +796,23 @@ async def analyze_portfolio(request: PortfolioRequest):
                 'rows': len(portfolio_cum_windowed)
             }
         
+        # Summary CAGR audit log (window-based, not bucketed)
+        if summary_cagr_audit is not None:
+            audit_log['metrics']['summary_cagr'] = {
+                **summary_cagr_audit,
+                'source': 'window'
+            }
+            audit_log['summary_cagr_source'] = 'window'
+            audit_log['summary_cagr_actual_years'] = summary_cagr_audit['actual_years']
+            audit_log['summary_cagr_start_date'] = summary_cagr_audit['start_date']
+            audit_log['summary_cagr_end_date'] = summary_cagr_audit['end_date']
+        
+        if summary_cagr_benchmark_audit is not None:
+            audit_log['metrics']['summary_cagr_benchmark'] = {
+                **summary_cagr_benchmark_audit,
+                'source': 'window'
+            }
+        
         if len(portfolio_drawdown) > 0:
             audit_log['metrics']['drawdown_chart'] = {
                 'start': portfolio_drawdown.index[0].strftime('%Y-%m-%d'),
@@ -781,8 +820,47 @@ async def analyze_portfolio(request: PortfolioRequest):
                 'rows': len(portfolio_drawdown)
             }
         
+        # Asset breakdown audit log
+        if len(prices_portfolio_windowed) > 0 and len(asset_breakdown) > 0:
+            audit_log['metrics']['asset_breakdown'] = {
+                'start': prices_portfolio_windowed.index[0].strftime('%Y-%m-%d'),
+                'end': prices_portfolio_windowed.index[-1].strftime('%Y-%m-%d'),
+                'n_assets': len(asset_breakdown),
+                'window_length_years': safe_float(actual_period_years) if actual_period_years else None
+            }
+        
+        # Summary CAGR audit log (window-based, not bucketed)
+        if summary_cagr_audit is not None:
+            audit_log['metrics']['summary_cagr'] = {
+                **summary_cagr_audit,
+                'source': 'window'
+            }
+            audit_log['summary_cagr_source'] = 'window'
+            audit_log['summary_cagr_actual_years'] = summary_cagr_audit['actual_years']
+            audit_log['summary_cagr_start_date'] = summary_cagr_audit['start_date']
+            audit_log['summary_cagr_end_date'] = summary_cagr_audit['end_date']
+        
+        if summary_cagr_benchmark_audit is not None:
+            audit_log['metrics']['summary_cagr_benchmark'] = {
+                **summary_cagr_benchmark_audit,
+                'source': 'window'
+            }
+        
         # Consistency assertions (warnings, not errors)
         consistency_warnings = []
+        
+        # Check: Summary CAGR and cumulative return use the same window dates
+        if summary_cagr_audit is not None and len(portfolio_cum_windowed) > 0:
+            cagr_start = summary_cagr_audit['start_date']
+            cagr_end = summary_cagr_audit['end_date']
+            cum_start = portfolio_cum_windowed.index[0].strftime('%Y-%m-%d')
+            cum_end = portfolio_cum_windowed.index[-1].strftime('%Y-%m-%d')
+            
+            if cagr_start != cum_start or cagr_end != cum_end:
+                consistency_warnings.append(
+                    f"INCONSISTENCY: Summary CAGR window ({cagr_start} to {cagr_end}) != "
+                    f"Summary cumulative return window ({cum_start} to {cum_end})"
+                )
         
         # Check: cumulative return from Summary should equal (last value of growth chart / 1000 - 1)
         if len(portfolio_cum_windowed) > 0 and len(growth_of_100) > 0:
@@ -815,6 +893,25 @@ async def analyze_portfolio(request: PortfolioRequest):
                 consistency_warnings.append(
                     f"INCONSISTENCY: YTD contributions sum ({ytd_contrib_sum:.2f}%) != "
                     f"YTD portfolio return ({ytd_return_pct:.2f}%)"
+                )
+        
+        # Check: Asset breakdown uses same window as portfolio
+        # Verify that asset breakdown is computed from the same windowed prices
+        if len(asset_breakdown) > 0 and len(prices_portfolio_windowed) > 0:
+            breakdown_window_start = prices_portfolio_windowed.index[0].strftime('%Y-%m-%d')
+            breakdown_window_end = prices_portfolio_windowed.index[-1].strftime('%Y-%m-%d')
+            expected_start = effective_start_date.strftime('%Y-%m-%d') if effective_start_date else None
+            expected_end = actual_end_date.strftime('%Y-%m-%d') if isinstance(actual_end_date, pd.Timestamp) else pd.Timestamp(actual_end_date).strftime('%Y-%m-%d')
+            
+            if expected_start and breakdown_window_start != expected_start:
+                consistency_warnings.append(
+                    f"INCONSISTENCY: Asset breakdown window start ({breakdown_window_start}) != "
+                    f"Effective start date ({expected_start})"
+                )
+            if expected_end and breakdown_window_end != expected_end:
+                consistency_warnings.append(
+                    f"INCONSISTENCY: Asset breakdown window end ({breakdown_window_end}) != "
+                    f"As-of date ({expected_end})"
                 )
         
         # Add consistency warnings to audit log

@@ -584,6 +584,191 @@ def compute_sector_weights(tickers, weights, sector_info):
     
     return sector_weights
 
+def compute_window_cagr(prices, weights=None):
+    """
+    Compute CAGR over the actual analysis window (effective_start_date → as_of).
+    
+    This function is designed for Summary metrics and uses the actual period length
+    from the windowed data, not hardcoded horizons like 1Y/3Y/5Y.
+    
+    IMPORTANT: This function assumes prices are already windowed to the desired period.
+    It does NOT apply any additional lookback - uses all provided data.
+    
+    prices: DataFrame of daily prices (index = dates, columns = tickers)
+           Should already be filtered to the effective window (no additional lookback applied)
+    weights: optional dict/Series of ticker -> weight for portfolio
+    
+    Returns: tuple (cagr, audit_info) where:
+            - cagr: float or None if insufficient data
+            - audit_info: dict with 'start_date', 'end_date', 'n_obs', 'actual_years' or None if insufficient data
+    """
+    if prices.empty:
+        return None, None
+    
+    prices = prices.sort_index()
+    
+    # Compute daily returns
+    daily_returns = prices.pct_change().dropna()
+    
+    # Require at least 20 trading days for reliable CAGR calculation
+    if len(daily_returns) < 20:
+        return None, None
+    
+    # Build portfolio returns if weights provided
+    if weights is not None:
+        w = pd.Series(weights).reindex(daily_returns.columns).fillna(0)
+        portfolio_daily = (daily_returns * w).sum(axis=1)
+        returns_series = portfolio_daily
+    else:
+        # Assume single-column DF for benchmark
+        if daily_returns.shape[1] == 1:
+            returns_series = daily_returns.iloc[:, 0]
+        else:
+            w = pd.Series(1 / daily_returns.shape[1], index=daily_returns.columns)
+            returns_series = (daily_returns * w).sum(axis=1)
+    
+    # Calculate actual period length from return index endpoints
+    start_date = returns_series.index[0]
+    end_date = returns_series.index[-1]
+    actual_years = (end_date - start_date).days / 365.25
+    
+    # Require positive period length
+    if actual_years <= 0:
+        return None, None
+    
+    # Compute total return: compound all daily returns
+    total_return = (1 + returns_series).prod() - 1
+    
+    # Compute CAGR using ACTUAL period length (not hardcoded)
+    cagr = (1 + total_return) ** (1 / actual_years) - 1
+    
+    # Audit info
+    audit_info = {
+        'start_date': start_date.strftime('%Y-%m-%d'),
+        'end_date': end_date.strftime('%Y-%m-%d'),
+        'n_obs': len(returns_series),
+        'actual_years': float(actual_years)
+    }
+    
+    return float(cagr), audit_info
+
+def compute_asset_breakdown(prices, weights):
+    """
+    Compute asset-level metrics for the Asset Breakdown table.
+    
+    Uses the same analysis window as all other metrics (effective_start_date → actual_end_date).
+    No additional lookback is applied - uses all provided windowed prices.
+    
+    prices: DataFrame of daily prices (index = dates, columns = tickers)
+           Should already be filtered to the effective window (no additional lookback applied)
+    weights: dict/Series of ticker -> weight for portfolio
+    
+    Returns: list of dicts, one per asset, with keys:
+            - ticker: str
+            - weight: float (as decimal, e.g., 0.25 for 25%)
+            - cagr: float (as decimal, e.g., 0.12 for 12%) or None if insufficient data
+            - volatility: float (as decimal, e.g., 0.15 for 15%) or None if insufficient data
+            - bestDay: float (as decimal, e.g., 0.05 for 5%) or None if insufficient data
+            - worstDay: float (as decimal, e.g., -0.03 for -3%) or None if insufficient data
+    """
+    if prices.empty:
+        return []
+    
+    prices = prices.sort_index()
+    
+    # Compute daily returns for all assets
+    daily_returns = prices.pct_change().dropna()
+    
+    if len(daily_returns) < 20:
+        # Insufficient data - return basic structure with None values
+        return [
+            {
+                'ticker': ticker,
+                'weight': float(weights.get(ticker, 0.0)),
+                'cagr': None,
+                'volatility': None,
+                'bestDay': None,
+                'worstDay': None
+            }
+            for ticker in weights.keys()
+        ]
+    
+    # Calculate window length once from daily returns index
+    start_date = daily_returns.index[0]
+    end_date = daily_returns.index[-1]
+    window_length_years = (end_date - start_date).days / 365.25
+    
+    asset_breakdown = []
+    
+    for ticker in weights.keys():
+        weight = float(weights.get(ticker, 0.0))
+        
+        # Handle cash tickers
+        if is_cash_ticker(ticker):
+            asset_breakdown.append({
+                'ticker': ticker,
+                'weight': weight,
+                'cagr': 0.0,
+                'volatility': 0.0,
+                'bestDay': 0.0,
+                'worstDay': 0.0
+            })
+            continue
+        
+        # Get asset daily returns
+        if ticker not in daily_returns.columns:
+            # Ticker not in prices (shouldn't happen if data is properly aligned)
+            asset_breakdown.append({
+                'ticker': ticker,
+                'weight': weight,
+                'cagr': None,
+                'volatility': None,
+                'bestDay': None,
+                'worstDay': None
+            })
+            continue
+        
+        asset_daily = daily_returns[ticker].dropna()
+        
+        if len(asset_daily) < 20:
+            # Insufficient data for this asset
+            asset_breakdown.append({
+                'ticker': ticker,
+                'weight': weight,
+                'cagr': None,
+                'volatility': None,
+                'bestDay': None,
+                'worstDay': None
+            })
+            continue
+        
+        # Compute total return over window
+        total_return = (1 + asset_daily).prod() - 1
+        
+        # Compute CAGR using actual window length
+        if window_length_years > 0:
+            cagr = (1 + total_return) ** (1 / window_length_years) - 1
+        else:
+            cagr = None
+        
+        # Compute annualized volatility (pandas std uses ddof=1 by default)
+        volatility = asset_daily.std() * (252 ** 0.5)
+        
+        # Best and worst day
+        best_day = float(asset_daily.max())
+        worst_day = float(asset_daily.min())
+        
+        asset_breakdown.append({
+            'ticker': ticker,
+            'weight': weight,
+            'cagr': float(cagr) if cagr is not None else None,
+            'volatility': float(volatility) if not pd.isna(volatility) else None,
+            'bestDay': best_day,
+            'worstDay': worst_day
+        })
+    
+    return asset_breakdown
+
 def compute_daily_returns(prices, weights=None):
     """
     Compute daily returns for portfolio or benchmark.
