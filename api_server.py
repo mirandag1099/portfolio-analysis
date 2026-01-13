@@ -418,8 +418,15 @@ async def analyze_portfolio(request: PortfolioRequest):
                 common_start_date = pd.Timestamp(fetch_start_date)
         
         # Compute effective_start_date = max(user_selected_start_date, common_start_date)
+        # Track if we had to adjust the user's selected date due to insufficient data
+        start_date_adjusted = False
         if user_selected_start_date is not None:
-            effective_start_date = max(user_selected_start_date, common_start_date)
+            if user_selected_start_date < common_start_date:
+                # User's date is too old - use common_start_date instead
+                effective_start_date = common_start_date
+                start_date_adjusted = True
+            else:
+                effective_start_date = user_selected_start_date
         else:
             effective_start_date = common_start_date
         
@@ -624,15 +631,16 @@ async def analyze_portfolio(request: PortfolioRequest):
         # Compute window-based CAGR using fractional years
         # CAGR = (1 + total_return) ** (1 / period_years) - 1
         # Return as PERCENTAGES (46.0 for 46%) - frontend expects percentages
+        # Require at least 60 trading days for reliable CAGR calculation
         summary_cagr_portfolio = None
         summary_cagr_benchmark = None
         
         if period_years and period_years > 0:
-            if len(portfolio_daily_windowed) > 0:
+            if len(portfolio_daily_windowed) >= 60:
                 total_return = (1 + portfolio_daily_windowed).prod() - 1
                 summary_cagr_portfolio = safe_float(((1 + total_return) ** (1 / period_years) - 1) * 100)
             
-            if len(benchmark_daily_windowed) > 0:
+            if len(benchmark_daily_windowed) >= 60:
                 bench_total_return = (1 + benchmark_daily_windowed).prod() - 1
                 summary_cagr_benchmark = safe_float(((1 + bench_total_return) ** (1 / period_years) - 1) * 100)
         
@@ -958,6 +966,13 @@ async def analyze_portfolio(request: PortfolioRequest):
         
         # Warnings
         warnings = []
+        if start_date_adjusted:
+            limiting_info = f'Limited by {limiting_ticker}' if limiting_ticker else 'Limited by benchmark'
+            warnings.append(
+                f'Start date automatically adjusted from {user_selected_start_date.strftime("%Y-%m-%d")} '
+                f'to {common_start_date.strftime("%Y-%m-%d")} due to insufficient data availability for all holdings. '
+                f'{limiting_info} (earliest available: {common_start_date.strftime("%Y-%m-%d")}).'
+            )
         total_weight = sum(weights.values())
         if abs(total_weight - 1.0) > 0.05:  # 5% tolerance
             warnings.append(f'Portfolio weights sum to {total_weight*100:.1f}%, expected 100%')
@@ -1061,6 +1076,7 @@ async def analyze_portfolio(request: PortfolioRequest):
             'analysisWindow': {
                 'requestedStartDate': request.requested_start_date if request.requested_start_date else None,
                 'effectiveStartDate': effective_start_date.strftime('%Y-%m-%d') if effective_start_date is not None else None,
+                'startDateAdjusted': start_date_adjusted,
                 'asOfDate': as_of_date.strftime('%Y-%m-%d') if as_of_date is not None else None,
                 'windowLengthDays': window_length_days,
                 'windowLengthYears': window_length_years,
