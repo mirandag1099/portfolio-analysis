@@ -71,6 +71,11 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 3. Install dependencies:
 ```bash
+pip install -r requirements.txt
+```
+
+Or install only core dependencies (without API server):
+```bash
 pip install pandas numpy matplotlib yfinance scipy
 ```
 
@@ -210,10 +215,38 @@ The tool includes comprehensive ETF mappings for accurate sector classification:
 
 ETFs are automatically classified into appropriate sectors for the allocation pie chart.
 
+## API Server
+
+The package includes a FastAPI server (`api_server.py`) that exposes the portfolio analysis functionality as a REST API. This allows integration with web frontends and other applications.
+
+### Running the API Server
+
+1. **Install API dependencies** (included in `requirements.txt`):
+```bash
+pip install -r requirements.txt
+```
+
+2. **Start the server**:
+```bash
+# Using uvicorn directly (recommended for development with auto-reload)
+uvicorn api_server:app --host 0.0.0.0 --port 8001 --reload
+
+# Or using Python script
+python api_server.py
+```
+
+The API will be available at:
+- **API endpoint**: `http://localhost:8001/analyze`
+- **Health check**: `http://localhost:8001/health`
+- **API docs**: `http://localhost:8001/docs` (FastAPI auto-generated Swagger UI)
+
+### API Usage
+
+See [API_README.md](./API_README.md) for detailed API documentation and usage examples.
+
 ## Future Enhancements
 
 Planned features include:
-- FastAPI backend for web UI integration
 - Exportable PDF reports
 - Additional optimization strategies
 - Multi-currency support
